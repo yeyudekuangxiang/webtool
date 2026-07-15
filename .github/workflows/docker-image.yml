@@ -1,0 +1,97 @@
+name: Build and Push Docker Image
+
+on:
+  push:
+    branches: [master]
+    tags: ['v*.*.*']
+  workflow_dispatch:
+
+env:
+  IMAGE_NAME: yeyudekuangxiang/webtool
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Compute tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha,format=long,prefix=
+            type=ref,event=tag
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v') }}
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            VITE_AMAP_KEY=${{ secrets.VITE_AMAP_KEY }}
+            VITE_AMAP_SECRET=${{ secrets.VITE_AMAP_SECRET }}
+
+      # 通知 NAS 上的 webhook 服务自动拉镜像并重启 webtool 容器
+      # 触发条件：master 分支 push 才触发，tag 触发或手工 dispatch 不触发（避免误更新）
+      #
+      # webhook 服务端是同步阻塞式：收到请求后会执行 docker pull + compose up，整个过程几分钟
+      # 策略：
+      #   1. 等待最长 5 分钟（300s）拿响应；理想情况服务端会在跑完后返回 2xx 让 Action 显式成功
+      #   2. 如果 5 分钟还没回，TCP 请求其实早就送达了，NAS 那头还在继续跑——
+      #      此时 curl 因超时返回非零，由 continue-on-error 兜底防止 Action 标红
+      - name: Trigger NAS redeploy
+        if: github.ref == 'refs/heads/master'
+        continue-on-error: true
+        env:
+          IMAGE: docker.1ms.run/${{ env.IMAGE_NAME }}:latest
+          REPO: ${{ github.server_url }}/${{ github.repository }}
+          COMMIT: ${{ github.sha }}
+          NAS_TOKEN: ${{ secrets.NAS_WEBHOOK_TOKEN }}
+        run: |
+          # 用 jq 安全构造 JSON，避免在 bash 字符串里手动拼接踩转义坑
+          PAYLOAD=$(jq -nc \
+            --arg image "$IMAGE" \
+            --arg project "webtool" \
+            --arg repo "$REPO" \
+            --arg commit "$COMMIT" \
+            '{image:$image, project:$project, repo:$repo, commit:$commit}')
+          echo "Payload: $PAYLOAD"
+
+          echo "Sending redeploy webhook (max wait 5 min for server-side pull/restart)..."
+          curl -ksSL \
+            --max-time 300 \
+            --connect-timeout 10 \
+            -o /tmp/webhook_resp.txt \
+            -w "HTTP %{http_code}, total %{time_total}s\n" \
+            -X POST "https://webhook.znil.cn:88/hooks/webtool" \
+            -H "X-Token: $NAS_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD" \
+            && echo "::notice::Webhook 完成，服务端响应：$(head -c 500 /tmp/webhook_resp.txt)" \
+            || echo "::notice::5 分钟内未收到 webhook 响应，请求已送达，NAS 仍在后台执行部署。"
+          echo "redeploy trigger done"
