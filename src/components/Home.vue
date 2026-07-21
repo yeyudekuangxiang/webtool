@@ -2,8 +2,6 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { categories, features } from '../features.js'
 
-defineEmits(['open'])
-
 // —— 分类分组数据 ——
 const groups = computed(() =>
   categories
@@ -141,7 +139,8 @@ onUnmounted(() => {
             class="submenu-item"
             role="menuitem"
             :href="`#/${f.key}`"
-            @click.prevent="$emit('open', f.key)"
+            target="_blank"
+            rel="noopener noreferrer"
           >
             <span class="mi-icon" aria-hidden="true">{{ f.icon }}</span>
             <span class="mi-body">

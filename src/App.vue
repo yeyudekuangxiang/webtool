@@ -1,5 +1,6 @@
 <script setup>
 import { computed, onMounted, onUnmounted, ref } from 'vue'
+import FeatureNav from './components/FeatureNav.vue'
 import Home from './components/Home.vue'
 import { findFeature } from './features.js'
 
@@ -51,10 +52,11 @@ const currentFeature = computed(() => (route.value ? findFeature(route.value) : 
 
     <main class="content">
       <template v-if="currentFeature">
+        <FeatureNav :current-key="currentFeature.key" />
         <component :is="currentFeature.component" />
       </template>
       <template v-else>
-        <Home @open="navigate" />
+        <Home />
       </template>
     </main>
 
